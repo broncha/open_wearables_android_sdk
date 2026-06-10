@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.11.1
+
+* **Fixed JVM signature clash**: removed the redundant `setLogLevel` setter that clashed with the `logLevel` property's generated JVM signature. The public `setLogLevel(level)` method and the `logLevel` property both remain available.
+
 ## 0.11.0
 
 * **Public `setLogLevel(level)` method** added for parity with iOS. Convenience wrapper around the existing `logLevel` property, intended for cross-platform bridges (React Native, Flutter) and Java callers. The `logLevel` property remains available.
