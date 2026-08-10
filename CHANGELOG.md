@@ -1,8 +1,12 @@
 # Changelog
 
+## 0.11.2
+
+* **New `getSyncStatus()` fields**: `initialExportDone` (Bool) and `isSyncing` (Bool) — allows apps to show progress UI during the initial historical export.
+
 ## 0.11.1
 
-* **Fixed JVM signature clash**: removed the redundant `setLogLevel` setter that clashed with the `logLevel` property's generated JVM signature. The public `setLogLevel(level)` method and the `logLevel` property both remain available.
+* **Fixed JVM signature clash**: removed the redundant `setLogLevel` setter that clashed with the `logLevel` property's generated JVM signature.
 
 ## 0.11.0
 
