@@ -289,11 +289,6 @@ class OpenWearablesHealthSDK private constructor(
         logMessage("Background sync stopped")
     }
 
-    suspend fun syncNow() {
-        val h = host ?: throw IllegalStateException("Host not configured")
-        ensureSyncManager().syncNow(h, customSyncUrl, fullExport = false)
-    }
-
     fun resetAnchors() {
         val sm = ensureSyncManager()
         sm.resetAnchors()
@@ -453,13 +448,8 @@ class OpenWearablesHealthSDK private constructor(
     // Logging
     // -----------------------------------------------------------------------
 
-    /**
-     * Sets the log level. Convenience wrapper mirroring the iOS API, intended
-     * for cross-platform bridges (React Native, Flutter) and Java callers.
-     */
-    fun setLogLevel(level: OWLogLevel) {
-        this.logLevel = level
-    }
+    // Note: `var logLevel` already exposes a `setLogLevel(OWLogLevel)` accessor
+    // for Java callers; an explicit fun with that name would clash with it.
 
     internal fun logMessage(message: String) {
         when (logLevel) {
