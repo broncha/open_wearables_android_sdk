@@ -233,7 +233,7 @@ class HealthConnectManager(
 
         try {
             when (typeId) {
-                "steps" -> readRecordType<StepsRecord>(hcClient, typeId, sinceTimestamp, limit, ascending, olderThanTimestamp) { convertSteps(it) }
+                "steps" -> readStepsResilient(hcClient, sinceTimestamp, olderThanTimestamp, limit, ascending)
                 "heartRate" -> readRecordType<HeartRateRecord>(hcClient, typeId, sinceTimestamp, limit, ascending, olderThanTimestamp) { convertHeartRate(it) }
                 "restingHeartRate" -> readRecordType<RestingHeartRateRecord>(hcClient, typeId, sinceTimestamp, limit, ascending, olderThanTimestamp) { convertRestingHeartRate(it) }
                 "heartRateVariabilitySDNN" -> readRecordType<HeartRateVariabilityRmssdRecord>(hcClient, typeId, sinceTimestamp, limit, ascending, olderThanTimestamp) { convertHrv(it) }
@@ -353,6 +353,84 @@ class HealthConnectManager(
     private fun zoneStr(offset: ZoneOffset?): String? = offset?.toString()
 
     private fun instantToIso(instant: Instant): String = UnifiedTimestamp.fromEpochMs(instant.toEpochMilli())
+
+    // Health Connect's readRecords aborts an ENTIRE StepsRecord page with
+    // "IllegalArgumentException: startTime must be before endTime" when the window
+    // holds a malformed StepsRecord (startTime >= endTime) — some OS/OEM step
+    // providers write these. Without handling, one bad record drops all steps.
+    // Fallback: bisect the range and skip only the minimal (<= 1 min) window that
+    // still throws, recovering every readable record around it. Runs only on failure.
+    private val stepsMinWindowMs = 60_000L // 1-minute floor for skipped windows
+    private val stepsMaxLookbackMs = 500L * 86_400_000L
+
+    private suspend fun readStepsResilient(
+        client: HealthConnectClient,
+        sinceTimestamp: Long?,
+        olderThanTimestamp: Long?,
+        limit: Int,
+        ascending: Boolean,
+    ): ProviderReadResult {
+        try {
+            return readRecordType<StepsRecord>(client, "steps", sinceTimestamp, limit, ascending, olderThanTimestamp) { convertSteps(it) }
+        } catch (e: IllegalArgumentException) {
+            logger("steps: read failed (${e.message}); recovering readable records via bisection")
+        }
+
+        val now = Instant.now().toEpochMilli()
+        val hi = olderThanTimestamp ?: now
+        val lo = sinceTimestamp ?: (hi - stepsMaxLookbackMs)
+
+        val collected = ArrayList<StepsRecord>()
+        val skipped = intArrayOf(0)
+        readStepsBisect(client, lo, hi, collected, skipped)
+
+        if (skipped[0] > 0) {
+            logger("steps: skipped ${skipped[0]} unreadable window(s) (<=${stepsMinWindowMs}ms) holding malformed record(s)")
+        }
+        if (collected.isEmpty()) return ProviderReadResult(UnifiedHealthData(), null, null)
+        // De-dup across bisection halves (a window boundary can re-return a record).
+        val result = convertSteps(collected.distinctBy { it.metadata.id })
+        // The whole [lo, hi] range was scanned in this pass; report `lo` as the
+        // oldest-seen timestamp so the round-robin treats this as the final chunk
+        // (reachedFloor) and stops instead of looping on a null cursor.
+        return ProviderReadResult(result.data, result.maxTimestamp, lo)
+    }
+
+    private suspend fun readStepsBisect(
+        client: HealthConnectClient,
+        lo: Long,
+        hi: Long,
+        out: MutableList<StepsRecord>,
+        skipped: IntArray,
+    ) {
+        if (lo >= hi) return
+        try {
+            val resp = client.readRecords(
+                ReadRecordsRequest(
+                    recordType = StepsRecord::class,
+                    timeRangeFilter = TimeRangeFilter.between(Instant.ofEpochMilli(lo), Instant.ofEpochMilli(hi)),
+                    ascendingOrder = true,
+                    pageSize = 5000, // Health Connect's max page size
+                )
+            )
+            out.addAll(resp.records)
+            // Full page returned — the window may hold more; split to read the rest.
+            if (resp.records.size >= 5000 && hi - lo > stepsMinWindowMs) {
+                val mid = lo + (hi - lo) / 2
+                readStepsBisect(client, lo, mid, out, skipped)
+                readStepsBisect(client, mid, hi, out, skipped)
+            }
+        } catch (e: IllegalArgumentException) {
+            if (hi - lo <= stepsMinWindowMs) {
+                skipped[0]++ // minimal window still throws — the malformed record is here; skip only this
+                return
+            }
+            // Always keep bisecting failing windows so all readable records are recovered.
+            val mid = lo + (hi - lo) / 2
+            readStepsBisect(client, lo, mid, out, skipped)
+            readStepsBisect(client, mid, hi, out, skipped)
+        }
+    }
 
     private fun convertSteps(records: List<StepsRecord>): ProviderReadResult {
         var maxTs: Long? = null
